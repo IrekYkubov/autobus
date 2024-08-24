@@ -2,7 +2,8 @@ import express from "express";
 import {readFile} from "node:fs/promises";
 import path from "node:path";
 import url from "node:url";
-import { DateTime } from "luxon";
+import { DateTime, Duration } from "luxon";
+import { WebSocketServer } from "ws";
 
 const __filename = url.fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -48,17 +49,21 @@ const getNextDeparture = (firstDepartureTime, frequencyMinutes) => {
 
 const sendUpdatedData = async () => {
   const buses = await loadBuses();
+  const now = DateTime.now().setZone(timeZone);
 
   const updatedBuses = buses.map((bus) => {
     const nextDeparture = getNextDeparture(
       bus.firstDepartureTime,
       bus.frequencyMinutes,
     );
+
+    const timeRemaining = Duration.fromMillis(nextDeparture.diff(now).toMillis());
     return {
       ...bus,
       nextDeparture: {
         date: nextDeparture.toFormat("yyyy-MM-dd"),
         time: nextDeparture.toFormat("HH:mm:ss"),
+        remaining: timeRemaining.toFormat("hh:mm:ss"),
       }
     }
   });
@@ -85,6 +90,36 @@ app.get('/next-departure', async (req, res) => {
   
 });
 
-app.listen(port, () => {
+const wss = new WebSocketServer({noServer: true});
+const clients = new Set();
+
+wss.on('connection', (ws) => {
+  clients.add(ws);
+  
+  const sendUpdates = async () => {
+    try {
+      const updatedBuses = await sendUpdatedData();
+      const sortedBuses = sortBuses(updatedBuses);
+      ws.send(JSON.stringify(sortedBuses));
+    } catch (error) {
+      console.error(`Error websocket connection: ${error}`);
+    }
+  }
+
+  const intervalId = setInterval(sendUpdates, 1000);
+
+  wss.on('close', () => {
+    clearInterval(intervalId);
+    clients.delete(ws);
+  })
+})
+
+const server = app.listen(port, () => {
 
 });
+
+server.on('upgrade', (req, socket, head) => {
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    wss.emit('connection', ws, req);
+  })
+})
